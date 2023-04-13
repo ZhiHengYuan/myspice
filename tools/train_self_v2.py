@@ -247,7 +247,9 @@ def main_worker(gpu, ngpus_per_node, cfg):
                 pred_scores_select = scores_all[h][idx_select[h].cpu()]
                 gt_labels_select = gt_cluster_labels[h]
                 loss = loss_fn(pred_scores_select.cpu(), gt_labels_select)
-
+                print("predict:   ")
+                print(pred_labels_h)
+                print(gt_labels)
                 if eval_ent:
                     probs = scores_all[h].mean(dim=0)
                     probs = torch.clamp(probs, min=1e-8)
