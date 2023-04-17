@@ -27,7 +27,7 @@ dist_url = 'tcp://localhost:10001'
 dist_backend = "nccl"
 seed = None
 gpu = 0
-multiprocessing_distributed = False
+multiprocessing_distributed = True
 
 start_epoch = 0
 print_freq = 1

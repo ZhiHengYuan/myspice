@@ -30,16 +30,9 @@ import logging
 from spice.utils.comm import get_rank
 import numpy as np
 
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter('/tf_logs/spice_loss')
-
 model_names = sorted(name for name in models.__dict__
-                     if name.islower() and not name.startswith("__")
-                     and callable(models.__dict__[name]))
+    if name.islower() and not name.startswith("__")
+    and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument(
@@ -55,16 +48,13 @@ parser.add_argument(
     default=1,
     type=int,
 )
-parser.add_argument("--local_rank", default=-1, type=int)
+
 
 def main():
     args = parser.parse_args()
     cfg = Config.fromfile(args.config_file)
-    cfg.local_rank = args.local_rank
-    torch.cuda.set_device(cfg.local_rank)
 
-    dist.init_process_group(backend='nccl')
-    # os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg.device_id)
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg.device_id)
 
     output_dir = cfg.results.output_dir
     if output_dir:
@@ -96,6 +86,7 @@ def main():
                       'which can slow down your training considerably! '
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
+
     if cfg.gpu is not None:
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
@@ -106,30 +97,76 @@ def main():
     cfg.distributed = cfg.world_size > 1 or cfg.multiprocessing_distributed
 
     ngpus_per_node = torch.cuda.device_count()
+    if cfg.multiprocessing_distributed:
+        # Since we have ngpus_per_node processes per node, the total world_size
+        # needs to be adjusted accordingly
+        cfg.world_size = ngpus_per_node * cfg.world_size
+        # Use torch.multiprocessing.spawn to launch distributed processes: the
+        # main_worker process function
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, cfg.copy()))
+    else:
+        # Simply call main_worker function
+        main_worker(args.gpu, ngpus_per_node, cfg)
 
-    # Simply call main_worker function
-    # main_worker(cfg.gpu, ngpus_per_node, cfg)
-    main_worker(cfg)
 
-
-def main_worker(cfg):
-    cfg.gpu = cfg.local_rank
-    print("cfg.gpu: ", cfg.gpu)
-    if cfg.gpu == 1:
-        time.sleep(1)
+def main_worker(gpu, ngpus_per_node, cfg):
+    cfg.gpu = gpu
     # logger = logging.getLogger("{}.trainer".format(cfg.logger_name))
     logger_name = "spice"
     cfg.logger_name = logger_name
 
     logger = setup_logger(logger_name, cfg.results.output_dir, get_rank())
 
+    # suppress printing if not master
+    if cfg.multiprocessing_distributed and cfg.gpu != 0:
+        def print_pass(*cfg):
+            pass
+        builtins.print = print_pass
+
+    if cfg.gpu is not None:
+        logger.info("Use GPU: {} for training".format(cfg.gpu))
+
+    if cfg.distributed:
+        if cfg.dist_url == "env://" and cfg.rank == -1:
+            cfg.rank = int(os.environ["RANK"])
+        if cfg.multiprocessing_distributed:
+            # For multiprocessing distributed training, rank needs to be the
+            # global rank among all the processes
+            cfg.rank = cfg.rank * ngpus_per_node + gpu
+        dist.init_process_group(backend=cfg.dist_backend, init_method=cfg.dist_url,
+                                world_size=cfg.world_size, rank=cfg.rank)
     # create model
     model = Sim2Sem(**cfg.model)
     logger.info(model)
 
-    torch.cuda.set_device(cfg.gpu)
-    model = model.cuda(cfg.gpu)
-    model = DDP(model, device_ids=[cfg.local_rank])
+    if cfg.distributed:
+        # For multiprocessing distributed, DistributedDataParallel constructor
+        # should always set the single device scope, otherwise,
+        # DistributedDataParallel will use all available devices.
+        if cfg.gpu is not None:
+            torch.cuda.set_device(cfg.gpu)
+            model.cuda(cfg.gpu)
+            # When using a single GPU per process and per
+            # DistributedDataParallel, we need to divide the batch size
+            # ourselves based on the total number of GPUs we have
+            cfg.batch_size = int(cfg.batch_size / ngpus_per_node)
+            cfg.workers = int((cfg.workers + ngpus_per_node - 1) / ngpus_per_node)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[cfg.gpu])
+        else:
+            model.cuda()
+            # DistributedDataParallel will divide and allocate batch_size to all
+            # available GPUs if device_ids are not set
+            model = torch.nn.parallel.DistributedDataParallel(model)
+    elif cfg.gpu is not None:
+        torch.cuda.set_device(cfg.gpu)
+        model = model.cuda(cfg.gpu)
+        # comment out the following line for debugging
+        raise NotImplementedError("Only DistributedDataParallel is supported.")
+    else:
+        # AllGather implementation (batch shuffle, queue update, etc.) in
+        # this code only supports DistributedDataParallel.
+        raise NotImplementedError("Only DistributedDataParallel is supported.")
+
     optimizer = make_optimizer(cfg, model)
     scheduler = None
 
@@ -153,7 +190,7 @@ def main_worker(cfg):
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             logger.info("=> loaded checkpoint '{}' (epoch {})"
-                        .format(cfg.resume, checkpoint['epoch']))
+                  .format(cfg.resume, checkpoint['epoch']))
         else:
             logger.info("=> no checkpoint found at '{}'".format(cfg.resume))
 
@@ -164,12 +201,14 @@ def main_worker(cfg):
     # Data loading code
     train_dataset = build_dataset(cfg.data_train)
 
-    # train_sampler = None
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    if cfg.distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    else:
+        train_sampler = None
 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=cfg.target_sub_batch_size, shuffle=False,
-        num_workers=cfg.workers, pin_memory=False, sampler=train_sampler, drop_last=True)
+        train_dataset, batch_size=cfg.target_sub_batch_size, shuffle=(train_sampler is None),
+        num_workers=cfg.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
     dataset_val = build_dataset(cfg.data_test)
     val_loader = torch.utils.data.DataLoader(dataset_val, batch_size=cfg.batch_size_test, shuffle=False, num_workers=1)
@@ -188,178 +227,166 @@ def main_worker(cfg):
     eval_ent = cfg.eval_ent
     eval_ent_weight = cfg.eval_ent_weight
     for epoch in range(cfg.start_epoch, cfg.epochs):
-
+        if cfg.distributed:
+            train_sampler.set_epoch(epoch)
         if scheduler is not None:
             scheduler.step()
 
         # train for one epoch
         train(train_loader, model, optimizer, epoch, cfg)
 
-        # save_checkpoint({
-        #     'epoch': epoch + 1,
-        #     'state_dict': model.state_dict(),
-        #     'optimizer': optimizer.state_dict(),
-        # }, is_best=False, filename='{}/checkpoint_{:04d}.pth.tar'.format(cfg.results.output_dir, epoch))
-        # save_checkpoint({
-        #     'epoch': epoch + 1,
-        #     'state_dict': model.state_dict(),
-        #     'optimizer': optimizer.state_dict(),
-        # }, is_best=False, filename='{}/checkpoint_last.pth.tar'.format(cfg.results.output_dir))
-        if (epoch % 5) == 0:
+        if not cfg.multiprocessing_distributed or (cfg.multiprocessing_distributed
+                and cfg.rank % ngpus_per_node == 0 and (epoch+1) % cfg.test_freq == 0):
             save_checkpoint({
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            }, is_best=False, filename='{}/checkpoint_{}.pth.tar'.format(cfg.results.output_dir, epoch))
-        model.eval()
-        loss_fn = nn.CrossEntropyLoss()
-        num_heads = len(cfg.model.head.multi_heads)
-        gt_labels = []
-        pred_labels = []
-        scores_all = []
-        accs = []
-        aris = []
-        nmis = []
-        feas_sim = []
-        for h in range(num_heads):
-            pred_labels.append([])
-            scores_all.append([])
+                'optimizer' : optimizer.state_dict(),
+            }, is_best=False, filename='{}/checkpoint_{:04d}.pth.tar'.format(cfg.results.output_dir, epoch))
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'optimizer' : optimizer.state_dict(),
+            }, is_best=False, filename='{}/checkpoint_last.pth.tar'.format(cfg.results.output_dir))
+            if (epoch+1) == cfg.epochs:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                }, is_best=False, filename='{}/checkpoint_final.pth.tar'.format(cfg.results.output_dir))
+            model.eval()
 
-        for _, (images, _, embs, labels, idx) in enumerate(val_loader):
-            images = images.to(cfg.gpu, non_blocking=True)
-            with torch.no_grad():
-                scores = model(images, forward_type="sem")
-            print("scores: ",scores)
-            feas_sim.append(embs)
-
-            assert len(scores) == num_heads
+            loss_fn = nn.CrossEntropyLoss()
+            num_heads = len(cfg.model.head.multi_heads)
+            gt_labels = []
+            pred_labels = []
+            scores_all = []
+            accs = []
+            aris = []
+            nmis = []
+            feas_sim = []
             for h in range(num_heads):
-                pred_idx = scores[h].argmax(dim=1)
-                pred_labels[h].append(pred_idx)
-                scores_all[h].append(scores[h])
+                pred_labels.append([])
+                scores_all.append([])
 
-            gt_labels.append(labels)
+            for _, (images, _, embs, labels, idx) in enumerate(val_loader):
+                images = images.to(cfg.gpu, non_blocking=True)
+                with torch.no_grad():
+                    scores = model(images, forward_type="sem")
 
-        gt_labels = torch.cat(gt_labels).long().cpu().numpy()
-        feas_sim = torch.cat(feas_sim, dim=0)
-        feas_sim = feas_sim.to(cfg.gpu, non_blocking=True)
-        losses = []
+                feas_sim.append(embs)
 
-        for h in range(num_heads):
-            scores_all[h] = torch.cat(scores_all[h], dim=0)
-            pred_labels[h] = torch.cat(pred_labels[h], dim=0)
+                assert len(scores) == num_heads
+                for h in range(num_heads):
+                    pred_idx = scores[h].argmax(dim=1)
+                    pred_labels[h].append(pred_idx)
+                    scores_all[h].append(scores[h])
 
-        idx_select, gt_cluster_labels = model(feas_sim=feas_sim, scores=scores_all, epoch=epoch,
-                                                forward_type="sim2sem")
+                gt_labels.append(labels)
 
-        for h in range(num_heads):
-            pred_labels_h = pred_labels[h].long().cpu().numpy()
+            gt_labels = torch.cat(gt_labels).long().cpu().numpy()
+            feas_sim = torch.cat(feas_sim, dim=0)
+            feas_sim = feas_sim.to(cfg.gpu, non_blocking=True)
+            losses = []
 
-            pred_scores_select = scores_all[h][idx_select[h].cpu()]
-            gt_labels_select = gt_cluster_labels[h]
-            loss = loss_fn(pred_scores_select.cpu(), gt_labels_select)
+            for h in range(num_heads):
+                scores_all[h] = torch.cat(scores_all[h], dim=0)
+                pred_labels[h] = torch.cat(pred_labels[h], dim=0)
 
-            if eval_ent:
-                probs = scores_all[h].mean(dim=0)
-                probs = torch.clamp(probs, min=1e-8)
-                ent = -(probs * torch.log(probs)).sum()
-                loss = loss - eval_ent_weight * ent
-            print("predict:   ")
-            print(pred_labels_h)
-            print(gt_labels)
+            idx_select, gt_cluster_labels = model(feas_sim=feas_sim, scores=scores_all, epoch=epoch,
+                                                  forward_type="sim2sem")
 
-            try:
-                acc = calculate_acc(pred_labels_h, gt_labels)
-            except:
-                acc = -1
+            for h in range(num_heads):
+                pred_labels_h = pred_labels[h].long().cpu().numpy()
 
-            nmi = calculate_nmi(pred_labels_h, gt_labels)
+                pred_scores_select = scores_all[h][idx_select[h].cpu()]
+                gt_labels_select = gt_cluster_labels[h]
+                loss = loss_fn(pred_scores_select.cpu(), gt_labels_select)
 
-            ari = calculate_ari(pred_labels_h, gt_labels)
+                if eval_ent:
+                    probs = scores_all[h].mean(dim=0)
+                    probs = torch.clamp(probs, min=1e-8)
+                    ent = -(probs * torch.log(probs)).sum()
+                    loss = loss - eval_ent_weight * ent
 
-            accs.append(acc)
-            nmis.append(nmi)
-            aris.append(ari)
+                try:
+                    acc = calculate_acc(pred_labels_h, gt_labels)
+                except:
+                    acc = -1
 
-            losses.append(loss.item())
+                nmi = calculate_nmi(pred_labels_h, gt_labels)
 
-        accs = np.array(accs)
-        nmis = np.array(nmis)
-        aris = np.array(aris)
-        losses = np.array(losses)
+                ari = calculate_ari(pred_labels_h, gt_labels)
 
-        best_acc_real = accs.max()
-        head_real = np.where(accs == best_acc_real)
-        head_real = head_real[0][0]
-        best_nmi_real = nmis[head_real]
-        best_ari_real = aris[head_real]
-        logger.info("Real: ACC: {}, NMI: {}, ARI: {}, head: {}".format(best_acc_real, best_nmi_real, best_ari_real,
-                                                                        head_real))
+                accs.append(acc)
+                nmis.append(nmi)
+                aris.append(ari)
 
-        head_loss = np.where(losses == losses.min())[0]
-        head_loss = head_loss[0]
-        best_acc_loss = accs[head_loss]
-        best_nmi_loss = nmis[head_loss]
-        best_ari_loss = aris[head_loss]
-        logger.info("Loss: ACC: {}, NMI: {}, ARI: {}, head: {}".format(best_acc_loss, best_nmi_loss, best_ari_loss,
-                                                                        head_loss))
-        if best_acc_real > best_acc:
-            best_acc = best_acc_real
-            best_nmi = best_nmi_real
-            best_ari = best_ari_real
-            best_epoch = epoch
-            best_head = np.array(accs).argmax()
+                losses.append(loss.item())
 
-            state_dict = model.state_dict()
-            state_dict_save = {}
-            for k in list(state_dict.keys()):
-                if not k.startswith('module.head'):
-                    state_dict_save[k] = state_dict[k]
-                # print(k)
-                if k.startswith('module.head.head_{}'.format(best_head)):
-                    state_dict_save[
-                        'module.head.head_0.{}'.format(k[len('module.head.head_{}.'.format(best_head))::])] = \
-                    state_dict[k]
+            accs = np.array(accs)
+            nmis = np.array(nmis)
+            aris = np.array(aris)
+            losses = np.array(losses)
 
-            torch.save(state_dict_save, '{}/checkpoint_best.pth.tar'.format(cfg.results.output_dir))
-            # save_checkpoint({
-            #     'epoch': epoch + 1,
-            #     'state_dict': model.state_dict(),
-            #     'optimizer': optimizer.state_dict(),
-            # }, is_best=False, filename='{}/checkpoint_best.pth.tar'.format(cfg.results.output_dir))
+            best_acc_real = accs.max()
+            head_real = np.where(accs == best_acc_real)
+            head_real = head_real[0][0]
+            best_nmi_real = nmis[head_real]
+            best_ari_real = aris[head_real]
+            logger.info("Real: ACC: {}, NMI: {}, ARI: {}, head: {}".format(best_acc_real, best_nmi_real, best_ari_real, head_real))
 
-        if min_loss > losses.min():
-            min_loss = losses.min()
-            loss_head = head_loss
-            loss_epoch = epoch
-            loss_acc = best_acc_loss
-            loss_nmi = best_nmi_loss
-            loss_ari = best_ari_loss
+            head_loss = np.where(losses == losses.min())[0]
+            head_loss = head_loss[0]
+            best_acc_loss = accs[head_loss]
+            best_nmi_loss = nmis[head_loss]
+            best_ari_loss = aris[head_loss]
+            logger.info("Loss: ACC: {}, NMI: {}, ARI: {}, head: {}".format(best_acc_loss, best_nmi_loss, best_ari_loss, head_loss))
+            if best_acc_real > best_acc:
+                best_acc = best_acc_real
+                best_nmi = best_nmi_real
+                best_ari = best_ari_real
+                best_epoch = epoch
+                best_head = np.array(accs).argmax()
 
-            state_dict = model.state_dict()
-            state_dict_save = {}
-            for k in list(state_dict.keys()):
-                if not k.startswith('module.head'):
-                    state_dict_save[k] = state_dict[k]
-                # print(k)
-                if k.startswith('module.head.head_{}'.format(loss_head)):
-                    state_dict_save[
-                        'module.head.head_0.{}'.format(k[len('module.head.head_{}.'.format(loss_head))::])] = \
-                    state_dict[k]
+                state_dict = model.state_dict()
+                state_dict_save = {}
+                for k in list(state_dict.keys()):
+                    if not k.startswith('module.head'):
+                        state_dict_save[k] = state_dict[k]
+                    # print(k)
+                    if k.startswith('module.head.head_{}'.format(best_head)):
+                        state_dict_save['module.head.head_0.{}'.format(k[len('module.head.head_{}.'.format(best_head))::])] = state_dict[k]
 
-            torch.save(state_dict_save, '{}/checkpoint_select.pth.tar'.format(cfg.results.output_dir))
+                torch.save(state_dict_save, '{}/checkpoint_best.pth.tar'.format(cfg.results.output_dir))
+                # save_checkpoint({
+                #     'epoch': epoch + 1,
+                #     'state_dict': model.state_dict(),
+                #     'optimizer': optimizer.state_dict(),
+                # }, is_best=False, filename='{}/checkpoint_best.pth.tar'.format(cfg.results.output_dir))
 
-        model.train()
+            if min_loss > losses.min():
+                min_loss = losses.min()
+                loss_head = head_loss
+                loss_epoch = epoch
+                loss_acc = best_acc_loss
+                loss_nmi = best_nmi_loss
+                loss_ari = best_ari_loss
 
-        logger.info(
-            "FINAL -- Best ACC: {}, Best NMI: {}, Best ARI: {}, epoch: {}, head: {}".format(best_acc, best_nmi,
-                                                                                            best_ari, best_epoch,
-                                                                                            best_head))
-        logger.info("FINAL -- Select ACC: {}, Select NMI: {}, Select ARI: {}, epoch: {}, head: {}".format(loss_acc,
-                                                                                                            loss_nmi,
-                                                                                                            loss_ari,
-                                                                                                            loss_epoch,
-                                                                                                            loss_head))
+                state_dict = model.state_dict()
+                state_dict_save = {}
+                for k in list(state_dict.keys()):
+                    if not k.startswith('module.head'):
+                        state_dict_save[k] = state_dict[k]
+                    # print(k)
+                    if k.startswith('module.head.head_{}'.format(loss_head)):
+                        state_dict_save['module.head.head_0.{}'.format(k[len('module.head.head_{}.'.format(loss_head))::])] = state_dict[k]
+
+                torch.save(state_dict_save, '{}/checkpoint_select.pth.tar'.format(cfg.results.output_dir))
+
+            model.train()
+
+            logger.info("FINAL -- Best ACC: {}, Best NMI: {}, Best ARI: {}, epoch: {}, head: {}".format(best_acc, best_nmi, best_ari, best_epoch, best_head))
+            logger.info("FINAL -- Select ACC: {}, Select NMI: {}, Select ARI: {}, epoch: {}, head: {}".format(loss_acc, loss_nmi, loss_ari, loss_epoch, loss_head))
 
 
 def train(train_loader, model, optimizer, epoch, cfg):
@@ -379,6 +406,7 @@ def train(train_loader, model, optimizer, epoch, cfg):
     lr = AverageMeter('lr', ':.6f')
     lr.update(optimizer.param_groups[0]["lr"])
     info.append(lr)
+
     progress = ProgressMeter(
         len(train_loader),
         info,
@@ -414,9 +442,9 @@ def train(train_loader, model, optimizer, epoch, cfg):
 
             # Select samples and estimate the ground-truth relationship between samples.
             images_ori_l_batch = images_ori_l_batch.to(cfg.gpu, non_blocking=True)
-            images_trans_l_batch = images_trans_l_batch.to(cfg.gpu, non_blocking=True)
             with torch.no_grad():
                 scores_nl = model(images_ori_l_batch, forward_type="sem")
+
             assert num_heads == len(scores_nl)
 
             for h in range(num_heads):
@@ -426,7 +454,7 @@ def train(train_loader, model, optimizer, epoch, cfg):
             feas_sim.append(feas_sim_batch)
 
             if len(feas_sim) >= iters_end:
-                # train_loader.sampler.set_epoch(train_loader.sampler.epoch + 1)
+                train_loader.sampler.set_epoch(train_loader.sampler.epoch + 1)
                 break
 
         for h in range(num_heads):
@@ -477,10 +505,9 @@ def train(train_loader, model, optimizer, epoch, cfg):
                 optimizer.zero_grad()
                 loss_mean.backward()
                 optimizer.step()
+
                 for h in range(num_heads):
                     # measure accuracy and record loss
-                    loss_h = loss_dict['head_{}'.format(h)].item()
-                    writer.add_scalar("head_{}".format(h), loss_h, global_step=epoch)
                     losses[h].update(loss_dict['head_{}'.format(h)].item(), imgs_i[0].size(0))
 
         # measure elapsed time
@@ -490,6 +517,7 @@ def train(train_loader, model, optimizer, epoch, cfg):
         if ii % cfg.print_freq == 0:
             logger.info(progress.display(ii))
 
+
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
@@ -498,7 +526,6 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
-
     def __init__(self, name, fmt=':f'):
         self.name = name
         self.fmt = fmt
@@ -552,4 +579,3 @@ def adjust_learning_rate(optimizer, epoch, args):
 
 if __name__ == '__main__':
     main()
-
