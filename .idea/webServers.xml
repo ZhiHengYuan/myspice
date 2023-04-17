@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="1cd7c314-92bc-4582-884d-a39f980ea268" name="3090">
+        <fileTransfer rootFolder="/hy-tmp/SPICE" accessType="SFTP" host="i-2.gpushare.com" port="34528" sshConfigId="9f774c71-d24d-4e59-9935-e8fe778f3a2c" sshConfig="root@i-2.gpushare.com:34528 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
