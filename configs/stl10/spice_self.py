@@ -1,6 +1,6 @@
 model_name = "spice_self"
 pre_model = "/kaggle/input/d/zhihengyuan/modelfile/results/stl10/moco/checkpoint_0105.pth.tar"
-embedding = "/kaggle/input/d/zhihengyuan/modelfile/results/embedding/feas_moco_512_l2.npy"
+embedding = "/kaggle/input/d/zhihengyuan/modelfile/results/stl10/embedding/feas_moco_512_l2.npy"
 resume = "/kaggle/working/results/stl10/spice_self/checkpoint_last.pth.tar".format(model_name)
 model_type = "clusterresnet"
 num_head = 10
