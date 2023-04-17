@@ -37,7 +37,7 @@ eval_ent_weight = 0
 
 data_train = dict(
     type="stl10_emb",
-    root_folder="../datasets/stl10",
+    root_folder="/kaggle/input/stl10-binary-files",
     embedding=embedding,
     split="train+test",
     ims_per_batch=batch_size,
