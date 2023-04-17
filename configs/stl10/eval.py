@@ -1,6 +1,6 @@
 model_name = "eval"
 # weight = './model_zoo/self_model_stl10.pth.tar'
-weight = './results/stl10/spice_self/checkpoint_0004.pth.tar'
+weight = '../results/stl10/spice_self/checkpoint_select.pth.tar'
 model_type = "clusterresnet"
 # model_type = 'resnet18'
 num_cluster = 10
@@ -18,7 +18,7 @@ multiprocessing_distributed = True
 
 data_test = dict(
     type="stl10_emb",
-    root_folder="./datasets/stl10",
+    root_folder="../datasets/stl10",
     embedding=None,
     split="train+test",
     shuffle=False,
@@ -68,5 +68,5 @@ model = dict(
 )
 
 results = dict(
-    output_dir="./results/stl10/{}".format(model_name),
+    output_dir="../results/stl10/{}".format(model_name),
 )

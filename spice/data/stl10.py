@@ -1,3 +1,4 @@
+
 from __future__ import print_function
 from PIL import Image
 import os
@@ -41,7 +42,7 @@ class STL10(CIFAR10):
     ]
     splits = ('train', 'train+unlabeled', 'unlabeled', 'test', 'train+test')
 
-    def __init__(self, root, split='train', show=False, transform1=None, transform2=None,
+    def __init__(self, root, split='train', show=False, transform1=None, transform2=None, transform3=None, transform4=None,
                  download=False,):
         if split not in self.splits:
             raise ValueError('Split "{}" not found. Valid splits are: {}'.format(
@@ -50,6 +51,8 @@ class STL10(CIFAR10):
         self.root = os.path.expanduser(root)
         self.transform1 = transform1
         self.transform2 = transform2
+        self.transform3 = transform3
+        self.transform4 = transform4
         self.split = split  # train/test/unlabeled set
         self.show = show
 
@@ -130,6 +133,16 @@ class STL10(CIFAR10):
         else:
             img_trans2 = img
 
+        if self.transform3 is not None:
+            img_trans3 = self.transform3(img)
+        else:
+            img_trans3 = img
+
+        if self.transform4 is not None:
+            img_trans4 = self.transform4(img)
+        else:
+            img_trans4 = img
+
         if self.show:
             mean = np.array([0.485, 0.456, 0.406])
             std = np.array([0.229, 0.224, 0.225])
@@ -144,8 +157,12 @@ class STL10(CIFAR10):
             plt.figure()
             plt.imshow(img_trans2)
             plt.show()
-
-        return img_trans1, img_trans2, target, index
+        if self.transform4 is not None:
+            return img_trans1, img_trans2, img_trans3, img_trans4, target, index
+        elif self.transform3 is not None:
+            return img_trans1, img_trans2, img_trans3, target, index
+        else:
+            return img_trans1, img_trans2, target, index
 
     def __len__(self):
         return self.data.shape[0]

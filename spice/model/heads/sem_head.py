@@ -105,7 +105,7 @@ class SemHead(nn.Module):
         return select_idx_all, select_labels_all
 
     def select_samples(self, feas_sim, scores, i):
-
+        # 选取每个类的中心点的索引
         _, idx_max = torch.sort(scores, dim=0, descending=True)
         idx_max = idx_max.cpu()
         num_per_cluster = idx_max.shape[0] // self.num_cluster
@@ -204,11 +204,12 @@ class SemHead(nn.Module):
     def loss(self, x, target, **kwargs):
         cls_socre = self.forward(x)
         loss = self.loss_fn_cls(cls_socre, target) * self.loss_weight["loss_cls"]
+        # loss = self.loss_fn_cls(cls_socre, target)
 
         if self.entropy:
             prob_mean = cls_socre.mean(dim=0)
             prob_mean[(prob_mean < self.EPS).data] = self.EPS
             loss_ent = (prob_mean * torch.log(prob_mean)).sum()
-            loss = loss + loss_ent * self.loss_weight["loss_ent"]
+            loss = loss * self.loss_weight["loss_cls"] + loss_ent * self.loss_weight["loss_ent"]
 
         return loss

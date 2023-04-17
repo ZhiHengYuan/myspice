@@ -32,11 +32,12 @@ class SemHeadMulti(nn.Module):
         labels_samples = torch.zeros_like(idx_k)
         for s in range(self.num_neighbor):
             labels_samples[:, s] = labels_pred[idx_k[:, s]]
-
+        print(labels_samples[:, 0:1])
         true_mtx = labels_samples[:, 0:1] == labels_samples
+        print(true_mtx)
+
         num_true = true_mtx.sum(dim=1)
         idx_true = num_true >= self.num_neighbor * self.ratio_confident
-        print(num_true.min())
         idx_conf = scores.max(dim=1)[0].cpu() > self.score_th
         idx_true = idx_true * idx_conf
         idx_select = torch.where(idx_true > 0)[0]

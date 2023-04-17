@@ -46,14 +46,24 @@ parser.add_argument(
 def extract_metric(net, p_label, evalloader, n_num):
     net.eval()
     feature_bank = []
+    pool = nn.AdaptiveAvgPool2d(1)
     with torch.no_grad():
         for batch_idx, (inputs1 , _, _, _, indexes) in enumerate(evalloader):
-            out = net(inputs1)
+            inputs1 = inputs1.cuda()
+            if len(out.shape) == 4:
+                out = pool(out)
+                out = torch.flatten(out, start_dim=1)
+            out = nn.functional.normalize(out, dim=1)
             feature_bank.append(out)
         feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
         sim_indices_list = []
         for batch_idx, (inputs1 , _, _, _, indexes) in enumerate(evalloader):
+            inputs1 = inputs1.cuda()
             out = net(inputs1)
+            if len(out.shape) == 4:
+                out = pool(out)
+                out = torch.flatten(out, start_dim=1)
+            out = nn.functional.normalize(out, dim=1)
             sim_matrix = torch.mm(out, feature_bank)
             _, sim_indices = sim_matrix.topk(k=n_num, dim=-1)
             sim_indices_list.append(sim_indices)
@@ -63,11 +73,12 @@ def extract_metric(net, p_label, evalloader, n_num):
         clean_num = 0
         correct_num = 0
         for batch_idx, (inputs1 , _, _, targets, indexes) in enumerate(evalloader):
+            targets = targets.cuda()
             labels = p_label[indexes].long()
             sim_indices = sim_indices_list[count]
             sim_labels = torch.gather(feature_labels.expand(inputs1.size(0), -1), dim=-1, index=sim_indices)
             # counts for each class
-            one_hot_label = torch.zeros(inputs1.size(0) * sim_indices.size(1), 10)
+            one_hot_label = torch.zeros(inputs1.size(0) * sim_indices.size(1), 10).cuda()
             one_hot_label = one_hot_label.scatter(dim=-1, index=sim_labels.view(-1, 1).long(), value=1.0)
             pred_scores = torch.sum(one_hot_label.view(inputs1.size(0), -1, 10), dim=1)
             count += 1
@@ -87,20 +98,20 @@ def extract_metric(net, p_label, evalloader, n_num):
             else:
                 prob_set = torch.cat((prob_set, prob), dim = 0)
                 pred_same_label_set = torch.cat((pred_same_label_set, s_idx), dim = 0)
-        print("metri devide:", devide)
         print(correct_num, clean_num)
         return pred_same_label_set
-            
+     
 def extract_confidence(net, p_label, evalloader, threshold):
+    print(p_label)
     net.eval()
-    devide = torch.tensor([])
+    devide = torch.tensor([]).cuda()
     clean_num = 0
     correct_num = 0
     for batch_idx, (inputs1, _, _, targets, indexes) in enumerate(evalloader):
-        targets = targets.float()
-        labels = p_label[indexes].float()
+        labels = p_label[indexes]
+        inputs1, targets = inputs1.cuda(), targets.cuda()
         logits = net(inputs1)
-        prob = torch.softmax(logits.detach_(), dim=-1)
+        prob = torch.softmax(logits[0].detach_(), dim=-1)
         max_probs, _ = torch.max(prob, dim=-1)
         mask = max_probs.ge(threshold).float()
         devide = torch.cat([devide, mask])
@@ -116,7 +127,7 @@ def extract_hybrid(devide1, devide2, p_label, evalloader):
     clean_num = 0
     correct_num = 0
     for batch_idx, (inputs1, _, _, targets, indexes) in enumerate(evalloader):
-        targets = targets.float()
+        targets = targets.cuda()
         labels = p_label[indexes].float()
         mask = devide[indexes]
         s_idx = (mask == 1)
@@ -183,16 +194,17 @@ def train(epoch, net, net2, trainloader, optimizer, criterion_rb, devide, p_labe
     optimizer.zero_grad()
     correct_u = 0
     unsupervised = 0
-    conf_self = torch.zeros(13000)
+    conf_self = torch.zeros(len(trainloader.dataset))
     for batch_idx, (inputs1 , inputs2, inputs3, inputs4, targets, indexes) in enumerate(trainloader):
         inputs1, inputs2, inputs3, inputs4, targets = inputs1.float().cuda(), inputs2.float().cuda(), inputs3.float().cuda(), inputs4.float().cuda(), targets.cuda().long()
         s_idx = (devide[indexes] == 1)
         u_idx = (devide[indexes] == 0)
+       
         labels = p_label[indexes].cuda().long()
         labels_x = torch.tensor(p_label[indexes][s_idx]).squeeze().long().cpu()
         target_x = torch.zeros(labels_x.shape[0], 10).scatter_(1, labels_x.view(-1,1), 1).float().cuda()
         
-        logit_o, logit_w1, logit_w2, logit_s = net(inputs1), net(inputs2), net(inputs3), net(inputs4)
+        logit_o, logit_w1, logit_w2, logit_s = net(inputs1)[0], net(inputs2)[0], net(inputs3)[0], net(inputs4)[0]
         logit_s = logit_s[s_idx]
         max_probs, _ = torch.max(torch.softmax(logit_o, dim=1), dim=-1)
         conf_self[indexes] = max_probs.detach().cpu()
@@ -202,9 +214,9 @@ def train(epoch, net, net2, trainloader, optimizer, criterion_rb, devide, p_labe
             # compute guessed labels of unlabel samples
             outputs_u11 = logit_w1[u_idx]
             outputs_u21  = logit_w2[u_idx]
-            logit_o2 = net2(inputs1)
-            logit_w12 = net2(inputs2)
-            logit_w22 = net2(inputs3)
+            logit_o2 = net2(inputs1)[0]
+            logit_w12 = net2(inputs2)[0]
+            logit_w22 = net2(inputs3)[0]
             outputs_u12 = logit_w12[u_idx]
             outputs_u22  = logit_w22[u_idx]
             pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u12, dim=1) + torch.softmax(outputs_u22, dim=1)) / 4
@@ -213,7 +225,7 @@ def train(epoch, net, net2, trainloader, optimizer, criterion_rb, devide, p_labe
             target_u = target_u.detach().float() 
             
             px = torch.softmax(logit_o2[s_idx], dim=1)
-            w_x = conf[indexes][s_idx]
+            w_x = conf[indexes][s_idx.cpu()]
             w_x = w_x.view(-1,1).float().cuda() 
             px = (1-w_x)*target_x + w_x*px              
             ptx = px**(1/0.5) # temparature sharpening           
@@ -227,7 +239,7 @@ def train(epoch, net, net2, trainloader, optimizer, criterion_rb, devide, p_labe
                 u_idx2 = (mask_u == 1)
                 unsupervised += torch.sum(mask_u).item()
                 correct_u += torch.sum((targets_u1[u_idx2] == targets[u_idx][u_idx2])).item()
-                update = indexes[u_idx][u_idx2]
+                update = indexes[u_idx.cpu()][u_idx2.cpu()]
                 devide[update] = True
                 p_label[update] = targets_u1[u_idx2].float()
         
@@ -245,7 +257,7 @@ def train(epoch, net, net2, trainloader, optimizer, criterion_rb, devide, p_labe
         mixed_input = l * input_a + (1 - l) * input_b        
         mixed_target = l * target_a + (1 - l) * target_b
                 
-        logits = net(mixed_input)
+        logits = net(mixed_input)[0]
         batch_size = target_x.shape[0]
         
         Lx, Lu = criterion_rb(logits[:batch_size*2], mixed_target[:batch_size*2], logits[batch_size*2:], mixed_target[batch_size*2:], epoch+batch_idx/num_iter)
@@ -254,12 +266,11 @@ def train(epoch, net, net2, trainloader, optimizer, criterion_rb, devide, p_labe
         total_loss.backward()
         train_loss.update(total_loss.item(), inputs2.size(0))
         optimizer.step()
-        
-        if batch_idx % 80 == 0:
-            print('Epoch: [{epoch}][{elps_iters}/{tot_iters}] '
-                  'Train loss: {train_loss.val:.4f} ({train_loss.avg:.4f}) '.format(
-                      epoch=epoch, elps_iters=batch_idx,tot_iters=len(trainloader), 
-                      train_loss=train_loss))
+        if batch_idx % 10 == 0:
+          print('Epoch: [{epoch}][{elps_iters}/{tot_iters}] '
+                'Train loss: {train_loss.val:.4f} ({train_loss.avg:.4f}) '.format(
+                    epoch=epoch, elps_iters=batch_idx,tot_iters=len(trainloader), 
+                    train_loss=train_loss))
     conf_self = (conf_self - conf_self.min()) / (conf_self.max() - conf_self.min())
     return train_loss.avg, devide, p_label, conf_self
 
@@ -283,15 +294,15 @@ def main():
 
     # create model
     net = Sim2Sem(**cfg.model)
-    net2 = copy.deepcopy()
-    net_uc = copy.deepcopy()
+    net2 = copy.deepcopy(net)
+    net_uc = copy.deepcopy(net)
     net_embd = build_model_sim(cfg.model_sim)
 
     try:
         state_dict = torch.load(cfg.model.o_model)
         state_dict2 = torch.load(cfg.model.e_model)
-        net_uc.load_state_dict(state_dict)
-        net_embd.load_state_dict(state_dict2, strict = True)
+        net_uc.load_state_dict(state_dict, strict = False)
+        net_embd.load_state_dict(state_dict2, strict = False)
         net.load_state_dict(state_dict, strict = False)
         net2.load_state_dict(state_dict, strict = False)
     except RuntimeError as e:
@@ -302,7 +313,7 @@ def main():
     net = net.cuda(cfg.gpu)
     net2 = net2.cuda(cfg.gpu)
     net_uc = net_uc.cuda(cfg.gpu)
-    net_embd = net_embd.cuda(cfg.gpu)
+    net_embd = net_embd.cuda(cfg.gpu) 
 
     cudnn.benchmark = True
 
@@ -313,11 +324,11 @@ def main():
     # Data loading code
     dataset_val = build_dataset(cfg.data_test)
     val_loader = torch.utils.data.DataLoader(dataset_val, batch_size=cfg.batch_size, shuffle=False, num_workers=1)
-
+    print("len(dataset_val): ", len(dataset_val))
      # Data loading code
     dataset_train = build_dataset(cfg.data_train)
     train_loader = torch.utils.data.DataLoader(dataset_train, batch_size=cfg.batch_size, shuffle=False, num_workers=1)
-
+    print("len(dataset_train):　　", len(dataset_train))
     # Extract Pseudo Label
     net.eval()
     num_heads = len(cfg.model.head.multi_heads)
@@ -338,33 +349,38 @@ def main():
 
         gt_labels.append(labels)
 
-    gt_labels = torch.cat(gt_labels).long().cpu().numpy()
-    feas_sim = torch.from_numpy(np.load(cfg.embedding))
-
-    pred_labels = torch.cat(pred_labels).long().cpu().numpy()
-    scores = torch.cat(scores_all).cpu()
-
-
-    try:
-        acc = calculate_acc(pred_labels, gt_labels)
-    except:
-        acc = -1
-
-    nmi = calculate_nmi(pred_labels, gt_labels)
-    ari = calculate_ari(pred_labels, gt_labels)
-
-    print("ACC: {}, NMI: {}, ARI: {}".format(acc, nmi, ari))
-
     # Divide Clean and Noisy set
-    devide1 = extract_confidence(net_uc, pred_labels, dataset_val, cfg.s_thr)
-    devide2 = extract_metric(net_embd, pred_labels, dataset_val, cfg.n_num)
-    devide = extract_hybrid(devide1, devide2, pred_labels, dataset_val)
-    print("devide: ", devide)
+    pred_labels = torch.cat(pred_labels).float()
+    devide2 = extract_metric(net_embd, pred_labels, val_loader, cfg.n_num)
+    devide1 = extract_confidence(net_uc, pred_labels, val_loader, cfg.s_thr)
+    devide = extract_hybrid(devide1, devide2, pred_labels, val_loader)
+    # print("devide: ", devide)
+
+    # gt_labels = torch.cat(gt_labels).long().cpu().numpy()
+    # feas_sim = torch.from_numpy(np.load(cfg.embedding))
+
+    # pred_labels = pred_labels.cpu().numpy()
+    # scores = torch.cat(scores_all).cpu()
+
+    # try:
+    #     acc = calculate_acc(pred_labels, gt_labels)
+    # except:
+    #     acc = -1
+
+    # nmi = calculate_nmi(pred_labels, gt_labels)
+    # ari = calculate_ari(pred_labels, gt_labels)
+
+    # print("ACC: {}, NMI: {}, ARI: {}".format(acc, nmi, ari))
+
+    criterion = criterion_rb()
+    print(len(train_loader.dataset))
+    conf1 =  torch.zeros(len(train_loader.dataset))
+    conf2 =  torch.zeros(len(train_loader.dataset))
 
     for epoch in range(cfg.epochs):
         print("== Train RUC ==")
-        loss, devide, p_label, conf1 = train(epoch, net, net2, train_loader, optimizer1, criterion, devide, p_label, conf2)
-        loss, devide, p_label, conf2 = train(epoch, net2, net, train_loader, optimizer2, criterion, devide, p_label, conf1)
+        loss, devide, p_label, conf1 = train(epoch, net, net2, train_loader, optimizer1, criterion, devide, pred_labels, conf2, cfg)
+        loss, devide, p_label, conf2 = train(epoch, net2, net, train_loader, optimizer2, criterion, devide, pred_labels, conf1, cfg)
         # acc, p_list = test_ruc(net, net2, val_loader, cfg.device, class_num)
         # print("accuracy: {}\n".format(acc))
 

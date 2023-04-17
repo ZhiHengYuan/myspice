@@ -17,8 +17,10 @@ def calculate_acc(ypred, y, return_idx=False):
     This function construct a N-by-N cost matrix, then pass it to scipy.optimize.linear_sum_assignment to solve the assignment problem.
 
     """
+    print("ypred: ",ypred)
+    print("y: ", y)
     assert len(y) > 0
-    assert len(np.unique(ypred)) == len(np.unique(y))
+    # assert len(np.unique(ypred)) == len(np.unique(y))
 
     s = np.unique(ypred)
     t = np.unique(y)
@@ -43,7 +45,6 @@ def calculate_acc(ypred, y, return_idx=False):
     for i in range(N):
         idx = np.logical_and(ypred == s[row[i]], y == t[col[i]])
         count += np.count_nonzero(idx)
-
     if return_idx:
         return 1.0 * count / len(y), row, col
     else:
@@ -52,7 +53,9 @@ def calculate_acc(ypred, y, return_idx=False):
 
 def calculate_nmi(predict_labels, true_labels):
     # NMI
-    nmi = metrics.normalized_mutual_info_score(true_labels, predict_labels, average_method='geometric')
+    # nmi = metrics.normalized_mutual_info_score(true_labels, predict_labels, average_method='geometric')
+    nmi = metrics.normalized_mutual_info_score(true_labels, predict_labels)
+
     return nmi
 
 

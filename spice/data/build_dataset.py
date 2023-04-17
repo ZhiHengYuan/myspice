@@ -1,3 +1,4 @@
+
 from spice.data.stl10 import STL10
 from spice.data.transformations import get_train_transformations
 from spice.data.stl10_embedding import STL10EMB
@@ -13,7 +14,7 @@ def build_dataset(data_cfg):
 
     train_trans1 = get_train_transformations(data_cfg.trans1)
     train_trans2 = get_train_transformations(data_cfg.trans2)
-
+    
     if type == "stl10":
         dataset = STL10(root=data_cfg.root_folder,
                         split=data_cfg.split,
@@ -21,6 +22,26 @@ def build_dataset(data_cfg):
                         transform1=train_trans1,
                         transform2=train_trans2,
                         download=False)
+    elif type == "RUC_stl10_train":
+        train_trans3 = get_train_transformations(data_cfg.trans3)
+        train_trans4 = get_train_transformations(data_cfg.trans4)
+        dataset = STL10(root=data_cfg.root_folder,
+                        split=data_cfg.split,
+                        show=data_cfg.show,
+                        transform1=train_trans1,
+                        transform2=train_trans2,
+                        transform3=train_trans3,
+                        transform4=train_trans4,
+                        download=False)
+    elif type == "RUC_stl10_test":
+        train_trans3 = get_train_transformations(data_cfg.trans3)
+        dataset = STL10(root=data_cfg.root_folder,
+                        split=data_cfg.split,
+                        show=data_cfg.show,
+                        transform1=train_trans1,
+                        transform2=train_trans2,
+                        transform3=train_trans3,
+                        download=False)  
     elif type == "stl10_emb":
         dataset = STL10EMB(root=data_cfg.root_folder,
                            split=data_cfg.split,

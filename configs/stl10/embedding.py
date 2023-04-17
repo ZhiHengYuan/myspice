@@ -1,5 +1,5 @@
 model_name = "embedding"
-weight = "./results/stl10/moco/checkpoint_0001.pth.tar"
+weight = "/kaggle/input/d/zhihengyuan/modelfile/results/stl10/moco/checkpoint_0105.pth.tar"
 model_type = "clusterresnet"
 num_cluster = 10
 batch_size = 1000
@@ -14,7 +14,7 @@ multiprocessing_distributed = True
 
 data_test = dict(
     type="stl10",
-    root_folder="./datasets/stl10",
+    root_folder="/kaggle/input/stl10-binary-files",
     split="train+test",
     shuffle=False,
     ims_per_batch=50,
@@ -49,5 +49,5 @@ model_sim = dict(
 
 
 results = dict(
-    output_dir="./results/stl10/{}".format(model_name),
+    output_dir="/kaggle/working/results/stl10/{}".format(model_name),
 )

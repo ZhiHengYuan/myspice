@@ -16,7 +16,9 @@ from spice.model.sim2sem import Sim2Sem
 from spice.utils.miscellaneous import mkdir, save_config
 import numpy as np
 from spice.utils.evaluation import calculate_acc, calculate_nmi, calculate_ari
-
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -32,9 +34,10 @@ parser.add_argument(
 )
 parser.add_argument(
     "--embedding",
-    default="./results/stl10/embedding/feas_moco_512_l2.npy",
+    default="../results/stl10/embedding/feas_moco_512_l2.npy",
     type=str,
 )
+parser.add_argument("--local_rank", default=-1, type=int)
 
 
 def main():
@@ -43,30 +46,33 @@ def main():
     cfg = Config.fromfile(args.config_file)
 
     cfg.embedding = args.embedding
-
+    cfg.local_rank = args.local_rank
+    torch.cuda.set_device(cfg.local_rank)
+    dist.init_process_group(backend='nccl')
     output_dir = cfg.results.output_dir
     if output_dir:
         mkdir(output_dir)
 
     output_config_path = os.path.join(output_dir, 'config.py')
     save_config(cfg, output_config_path)
+    main_worker(cfg)
 
+
+def main_worker(cfg):
+    cfg.gpu = cfg.local_rank
     if cfg.gpu is not None:
         print("Use GPU: {}".format(cfg.gpu))
 
     # create model
     model = Sim2Sem(**cfg.model)
-    print(model)
 
     torch.cuda.set_device(cfg.gpu)
     model = model.cuda(cfg.gpu)
+    model = DDP(model, device_ids=[cfg.local_rank])
 
     state_dict = torch.load(cfg.model.pretrained)
-    
     if 'state_dict' in state_dict.keys():
         state_dict = state_dict['state_dict']
-        print(state_dict.keys())
-
     # for k in list(state_dict.keys()):
     #     # Initialize the feature module with encoder_q of moco.
     #     if k.startswith('module.'):
@@ -76,13 +82,12 @@ def main():
 
     #     # delete renamed or unused k
     #     del state_dict[k]
-
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict, strict=True)
     cudnn.benchmark = True
 
     # Data loading code
     dataset_val = build_dataset(cfg.data_test)
-    val_loader = torch.utils.data.DataLoader(dataset_val, batch_size=cfg.batch_size, shuffle=False, num_workers=1)
+    val_loader = torch.utils.data.DataLoader(dataset_val, batch_size=cfg.batch_size, shuffle=True, num_workers=1)
 
     model.eval()
 
@@ -96,7 +101,6 @@ def main():
         images = images.to(cfg.gpu, non_blocking=True)
         with torch.no_grad():
             scores = model(images, forward_type="sem")
-
         assert len(scores) == num_heads
 
         pred_idx = scores[0].argmax(dim=1)
@@ -110,10 +114,8 @@ def main():
 
     pred_labels = torch.cat(pred_labels).long().cpu().numpy()
     scores = torch.cat(scores_all).cpu()
-    print("pred_labels:{}".format(pred_labels))
-    print("gt_labels:{}".format(gt_labels))
+    print("pred_labels:{}".format(np.unique(pred_labels)))
 
-    print("scores:{}".format(scores))
     try:
         acc = calculate_acc(pred_labels, gt_labels)
     except:
@@ -135,7 +137,6 @@ def main():
     labels_correct[idx_select] = labels_select
 
     np.save("{}/labels_reliable.npy".format(cfg.results.output_dir), labels_correct)
-
 
 if __name__ == '__main__':
     main()

@@ -1,7 +1,7 @@
 model_name = "spice_self"
-pre_model = "/kaggle/input/modelfile/results/stl10/moco/checkpoint_180.pth.tar"
-embedding = "/kaggle/input/modelfile/results/stl10/embedding/feas_moco_512_l2.npy"
-resume = "/kaggle/output/working/results/stl10/{}/checkpoint_last.pth.tar".format(model_name)
+pre_model = "/kaggle/input/d/zhihengyuan/modelfile/results/stl10/moco/checkpoint_0105.pth.tar"
+embedding = "/kaggle/input/d/zhihengyuan/modelfile/results/embedding/feas_moco_512_l2.npy"
+resume = "/kaggle/working/results/stl10/spice_self/checkpoint_last.pth.tar".format(model_name)
 model_type = "clusterresnet"
 num_head = 10
 num_workers = 1
@@ -21,7 +21,7 @@ center_ratio = 0.5
 sim_center_ratio = 0.9
 epochs = 100
 world_size = 1
-workers = 1
+workers = 4
 rank = 0
 dist_url = 'tcp://localhost:10001'
 dist_backend = "nccl"
@@ -37,7 +37,7 @@ eval_ent_weight = 0
 
 data_train = dict(
     type="stl10_emb",
-    root_folder="/kaggle/input/stl10-binary/stl10",
+    root_folder="../datasets/stl10",
     embedding=embedding,
     split="train+test",
     ims_per_batch=batch_size,
@@ -66,7 +66,7 @@ data_train = dict(
 
 data_test = dict(
     type="stl10_emb",
-    root_folder="/kaggle/input/stl10-binary/stl10",
+    root_folder="/kaggle/input/stl10-binary-files",
     embedding=embedding,
     split="train+test",
     shuffle=False,
@@ -120,7 +120,8 @@ model = dict(
 
 solver = dict(
     type="adam",
-    base_lr=0.001,
+    base_lr=0.005,
+    momentum=0.9,
     bias_lr_factor=1,
     weight_decay=0,
     weight_decay_bias=0,
@@ -131,5 +132,5 @@ solver = dict(
 )
 
 results = dict(
-    output_dir="/kaggle/output/working/results/stl10/{}".format(model_name),
+    output_dir="/kaggle/working/results/stl10/{}".format(model_name),
 )

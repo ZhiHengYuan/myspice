@@ -2,8 +2,6 @@ import argparse
 import os
 import sys
 sys.path.insert(0, './')
-rootpath=str("/content/drive/MyDrive/my_spice/")
-sys.path.append(rootpath)#将工程根目录加入到python搜索路径中
 
 import torch
 import torch.nn as nn
@@ -46,7 +44,6 @@ def main():
 
     # create model
     model_sim = build_model_sim(cfg.model_sim)
-    print(model_sim)
 
     torch.cuda.set_device(cfg.gpu)
     model_sim = model_sim.cuda(cfg.gpu)
@@ -61,7 +58,8 @@ def main():
     val_loader = torch.utils.data.DataLoader(dataset_val, batch_size=cfg.batch_size, shuffle=False, num_workers=1)
 
     model_sim.eval()
-
+    print("------------")
+    # print(model_sim.state_dict())
     pool = nn.AdaptiveAvgPool2d(1)
 
     feas_sim = []

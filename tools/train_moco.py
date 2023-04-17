@@ -10,17 +10,13 @@ import time
 import warnings
 import sys
 sys.path.insert(0, './')
-rootpath=str("/content/drive/MyDrive/my_spice/")
-sys.path.append(rootpath)#将工程根目录加入到python搜索路径中
+
 import torch
 import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
-import torch.distributed as dist
 import torch.optim
-import torch.multiprocessing as mp
 import torch.utils.data
-import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.models as models
 from spice.model.feature_modules.cluster_resnet import ClusterResNet
@@ -32,31 +28,36 @@ import moco.builder
 from moco.stl10 import STL10
 from moco.cifar import CIFAR10, CIFAR100
 
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
+
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--data_type', default='stl10',
                     help='path to dataset')
-parser.add_argument('--data', metavar='DIR', default='./datasets/stl10',
+parser.add_argument('--data', metavar='DIR', default='../datasets/stl10',
                     help='path to dataset')
 parser.add_argument('--all', default=1, type=int,
                     help='1 denotes using both train and test data')
 parser.add_argument('--img_size', default=96, type=int,
                     help='image size')
-parser.add_argument('--save_folder', metavar='DIR', default='./results/stl10/moco',
+parser.add_argument('--save_folder', metavar='DIR', default='../results/stl10/moco',
                     help='path to dataset')
 parser.add_argument('--save-freq', default=1, type=int, metavar='N',
                     help='frequency of saving model')
 parser.add_argument('--arch', metavar='ARCH', default='clusterresnet')
-parser.add_argument('--workers', default=1, type=int, metavar='N',
+parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
-parser.add_argument('--epochs', default=100, type=int, metavar='N',
+parser.add_argument('--epochs', default=1000, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('--batch-size', default=128, type=int,
+parser.add_argument('--batch-size', default=256, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -76,23 +77,12 @@ parser.add_argument('--print-freq', default=10, type=int,
 #                     help='path to latest checkpoint (default: none)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
-parser.add_argument('--world-size', default=1, type=int,
-                    help='number of nodes for distributed training')
-parser.add_argument('--rank', default=0, type=int,
-                    help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://localhost:10001', type=str,
-                    help='url used to set up distributed training')
-parser.add_argument('--dist-backend', default='nccl', type=str,
-                    help='distributed backend')
+
+
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--gpu', default='0', type=int,
-                    help='GPU id to use.')
-parser.add_argument('--multiprocessing-distributed', action='store_false',
-                    help='Use multi-processing distributed training to launch '
-                         'N processes per node, which has N GPUs. This is the '
-                         'fastest way to use PyTorch for either single node or '
-                         'multi node data parallel training')
+parser.add_argument('--gpu', default=0, type=int,
+                    help='seed for initializing training. ')
 
 # moco specific configs:
 parser.add_argument('--moco-dim', default=128, type=int,
@@ -111,10 +101,13 @@ parser.add_argument('--aug-plus', action='store_false',
                     help='use moco v2 data augmentation')
 parser.add_argument('--cos', action='store_false',
                     help='use cosine lr schedule')
-
+parser.add_argument("--local_rank", default=-1, type=int)
 
 def main():
     args = parser.parse_args()
+
+    torch.cuda.set_device(args.local_rank)
+    dist.init_process_group(backend='nccl')
 
     if not os.path.exists(args.save_folder):
         os.makedirs(args.save_folder)
@@ -128,35 +121,22 @@ def main():
                       'which can slow down your training considerably! '
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
+    # mp.spawn(main_worker, args=(2, args,), nprocs=2, join=True)
+    main_worker(args)
 
-    if args.gpu is not None:
-        warnings.warn('You have chosen a specific GPU. This will completely '
-                      'disable data parallelism.')
+def main_worker(args):
+    args.gpu = args.local_rank
+    if args.gpu == 1:
+        time.sleep(1)
+    # dist.init_process_group('nccl', rank=rank, world_size=size)
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-
-    ngpus_per_node = torch.cuda.device_count()
-    main_worker(args.gpu, ngpus_per_node, args)
-        
-
-def main_worker(gpu, ngpus_per_node, args):
-    args.gpu = gpu
+    print("use gpu: ", args.gpu)
+    # suppress printing if not master
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
+
     # create model
     print("=> creating model '{}'".format(args.arch))
     if args.arch == "clusterresnet":
@@ -170,36 +150,10 @@ def main_worker(gpu, ngpus_per_node, args):
     model = moco.builder.MoCo(
         base_model,
         args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp)
-    print(model)
-
-    if args.distributed:
-        # For multiprocessing distributed, DistributedDataParallel constructor
-        # should always set the single device scope, otherwise,
-        # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            model.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs we have
-            args.batch_size = int(args.batch_size / ngpus_per_node)
-            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        else:
-            model.cuda()
-            # DistributedDataParallel will divide and allocate batch_size to all
-            # available GPUs if device_ids are not set
-            model = torch.nn.parallel.DistributedDataParallel(model)
-    elif args.gpu is not None:
-        torch.cuda.set_device(args.gpu)
-        model = model.cuda(args.gpu)
-        # comment out the following line for debugging
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
-    else:
-        # AllGather implementation (batch shuffle, queue update, etc.) in
-        # this code only supports DistributedDataParallel.
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
-
+    model = model.cuda(args.gpu)
+    torch.cuda.set_device(args.gpu)
+    model = DDP(model, device_ids=[args.local_rank])
+    # model = nn.parallel.DistributedDataParallel(model, device_ids=[rank])
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
@@ -253,7 +207,7 @@ def main_worker(gpu, ngpus_per_node, args):
             transforms.ToTensor(),
             normalize
         ]
-
+    print("load datasets...")
     if args.data_type == 'stl10':
         if args.all:
             split = "train+test+unlabeled"
@@ -269,48 +223,40 @@ def main_worker(gpu, ngpus_per_node, args):
                                  transform=moco.loader.TwoCropsTransform(transforms.Compose(augmentation)))
     else:
         raise TypeError
+    print("load datasets success!")
+    # train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=size, rank=rank)
 
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+        train_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=0, pin_memory=True, sampler=train_sampler, drop_last=True)
 
+    best_acc = 0
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
+
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
-
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
-            if (epoch+1) % args.save_freq == 0:
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': model.state_dict(),
-                    'optimizer' : optimizer.state_dict(),
-                }, is_best=False, filename='{}/checkpoint_{:04d}.pth.tar'.format(args.save_folder, epoch))
-
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': model.state_dict(),
-                    'optimizer' : optimizer.state_dict(),
-                }, is_best=False, filename='{}/checkpoint_last.pth.tar'.format(args.save_folder))
-
-            if (epoch+1) == args.epochs:
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': model.state_dict(),
-                    'optimizer' : optimizer.state_dict(),
-                }, is_best=False, filename='{}/checkpoint_final.pth.tar'.format(args.save_folder))
+        acc = train(train_loader, model, criterion, optimizer, epoch, args)
+        print("acc:  ", acc)
+        print(acc.item() > best_acc)
+        if acc.item() > best_acc:
+            best_acc = acc.item()
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'acc': best_acc,
+                'arch': args.arch,
+                'state_dict': model.state_dict(),
+                'optimizer' : optimizer.state_dict(),
+            }, is_best=False, filename='{}/checkpoint_best.pth.tar'.format(args.save_folder))
+        # if epoch % 10 == 0:
+        #     save_checkpoint({
+        #         'epoch': epoch + 1,
+        #         'arch': args.arch,
+        #         'state_dict': model.state_dict(),
+        #         'optimizer' : optimizer.state_dict(),
+        #     }, is_best=False, filename='{}/checkpoint_final.pth.tar'.format(args.save_folder))
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -328,14 +274,12 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
+    acc = 0
     for i, (images, _) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
-
-        if args.gpu is not None:
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
-
+        images[0] = images[0].cuda(args.gpu)
+        images[1] = images[1].cuda(args.gpu)
         # compute output
         output, target = model(im_q=images[0], im_k=images[1])
         loss = criterion(output, target)
@@ -345,8 +289,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), images[0].size(0))
         top1.update(acc1[0], images[0].size(0))
+        acc = top1.avg
         top5.update(acc5[0], images[0].size(0))
-
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
@@ -358,7 +302,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i)
-
+    return acc
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)

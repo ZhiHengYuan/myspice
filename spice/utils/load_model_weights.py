@@ -107,6 +107,7 @@ def load_model_weights(model, weights_file, model_type, head_id=0):
     elif model_type == "moco_sim":
         # rename moco pre-trained keys
         state_dict = pre_model['state_dict']
+        print("state_dict: ", state_dict)
         for k in list(state_dict.keys()):
             # Initialize the feature module with encoder_q of moco.
             if k.startswith('module.encoder_q'):
@@ -146,8 +147,9 @@ def load_model_weights(model, weights_file, model_type, head_id=0):
 
             # delete renamed or unused k
             del state_dict[k]
-
+        # print('state_dict:  ', state_dict)
         msg = model.load_state_dict(state_dict, strict=False)
+        # print(model.state_dict())
         print(msg)
 
     elif model_type == "moco_sim1":

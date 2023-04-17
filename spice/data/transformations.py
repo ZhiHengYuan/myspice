@@ -1,5 +1,6 @@
 import torchvision.transforms as transforms
 from spice.data.augment import Augment, Cutout
+from spice.data.ruc_augment import RandAugmentMC
 
 
 def get_train_transformations(cfg):
@@ -11,7 +12,29 @@ def get_train_transformations(cfg):
             transforms.ToTensor(),
             transforms.Normalize(**cfg.normalize)
         ])
+    elif cfg.aug_type == 'RUC_train':
+        return transforms.Compose([
+        transforms.RandomResizedCrop(size=32, scale=(0.2,1.)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(**cfg.normalize),
+    ])
+    elif cfg.aug_type == 'RUC_test':
+        return transforms.Compose([
+        transforms.Resize(32),
+        transforms.CenterCrop(32),
+        transforms.ToTensor(),
+        transforms.Normalize(**cfg.normalize),
+    ])
+    elif cfg.aug_type == 'RUC_strong':
+        return transforms.Compose([
+        transforms.RandomResizedCrop(size=32, scale=(0.2,1.)),
+        transforms.RandomHorizontalFlip(),
+        RandAugmentMC(n=2, m=2),
+        transforms.ToTensor(),
+        transforms.Normalize(**cfg.normalize),
 
+    ])
     elif cfg.aug_type == 'test':
         # Standard augmentation strategy
         return transforms.Compose([
